@@ -198,12 +198,73 @@ export declare namespace useQuery {
     skip: false;
   }
 
+  /**
+   * The constraint for `TOptions` in the `Modern` signatures.
+   *
+   * `variables` is deliberately only `unknown` here - see the `Modern`
+   * signatures for why the real check cannot live in the constraint. It still
+   * has to be listed: `Base.Options` is a weak type (every property is
+   * optional), so `{ variables: ... }` on its own would share no property with
+   * it and be rejected.
+   *
+   * The mapped type reports options that are not part of `useQuery.Options`.
+   * `TOptions` cannot reject them on its own because it is inferred from the
+   * very object literal being checked, so every key the user writes becomes part
+   * of it. Two details matter here:
+   *
+   * - The properties are required rather than optional. An optional `never`
+   *   would give a misspelled option a property in common with this weak type,
+   *   which is enough to satisfy the weak type check and let it through.
+   * - `SkipToken` is excluded from `TOptions` first. A conditionally skipped
+   *   query infers `TOptions` as a union of `SkipToken` and the options object,
+   *   and `keyof` of that union is `never`, which would silently make this a
+   *   no-op.
+   */
+  export type ConstraintFor<
+    TOptions,
+    TData,
+    TVariables extends OperationVariables,
+  > = Base.Options<TData, NoInfer<TVariables>> & {
+    variables?: unknown;
+  } & ([
+      Exclude<
+        keyof Exclude<TOptions, SkipToken>,
+        keyof Options<TData, TVariables>
+      >,
+    ] extends [never] ?
+      unknown
+    : never);
+
+  /**
+   * The `variables` option as it is required at the parameter position of the
+   * `Modern` signatures.
+   *
+   * `NoInfer` keeps this from becoming an inference site for `TVariables`. The
+   * mapped type reports variables that are not part of `TVariables`, for the
+   * same reason `ConstraintFor` has to check the option names.
+   */
+  export type OptionsFor<
+    TOptions,
+    TData,
+    TVariables extends OperationVariables,
+  > = Options<TData, NoInfer<TVariables>> & {
+    variables?: {
+      // variables that are not part of `TVariables`
+      [K in Exclude<
+        keyof TOptions["variables" & keyof TOptions],
+        keyof TVariables
+      >]?: never;
+    };
+  };
+
   export type ResultForOptions<
     TData,
     TVariables extends OperationVariables,
     TOptions extends
       | Record<string, never> // no options
-      | Options<TData, TVariables>
+      // `Base.Options` instead of `Options` because the `variables` option is
+      // not part of `TOptions` - see the `Modern` signatures for details.
+      | Base.Options<TData, TVariables>
       | SkipToken,
   > = LazyType<
     Result<
@@ -519,6 +580,28 @@ export declare namespace useQuery {
     }
 
     /** {@inheritDoc @apollo/client/react!useQuery.DocumentationTypes.useQuery:call(1)} */
+    // The exact `variables` check lives at the parameter position
+    // (`ConstraintFor` only says `variables?: unknown`), because a constraint
+    // cannot do it.
+    //
+    // TypeScript widens fresh literals when inferring an object literal into a
+    // naked type parameter, so `useQuery(query, { variables: { type: "main" } })`
+    // infers the candidate `{ variables: { type: string } }`. A constraint that
+    // required the exact `TVariables` (`{ type: "main" }`) would reject that
+    // candidate, and TypeScript then silently substitutes the constraint for
+    // `TOptions` - discarding every other inferred option along with it. That is
+    // what made `returnPartialData: false` come back as `boolean` and put
+    // `"partial"` into `dataState`.
+    //
+    // Widening also means the constraint could not do the check even if it did
+    // not collapse: once `{ type: "nope" }` has widened to `{ type: string }`
+    // there is nothing left to distinguish it from a valid value. Only the
+    // parameter position still sees the literal.
+    //
+    // `NoInfer` on `TVariables` there is required. Without it,
+    // `VariablesOption<TVariables>` becomes an inference site and the widened
+    // `{ type: string }` candidate wins over the one from the document, which
+    // stops invalid variable values from being reported at all.
     export interface Modern {
       /** {@inheritDoc @apollo/client/react!useQuery.DocumentationTypes.useQuery:call(1)} */
       <
@@ -538,24 +621,20 @@ export declare namespace useQuery {
         TData,
         TVariables extends OperationVariables,
         // this overload should never be manually defined, it should always be inferred
-        TOptions extends useQuery.Options<TData, NoInfer<TVariables>> &
-          VariablesOption<
-            TVariables & {
-              [K in Exclude<
-                keyof TOptions["variables"],
-                keyof TVariables
-              >]?: never;
-            }
-          >,
+        TOptions extends useQuery.ConstraintFor<TOptions, TData, TVariables>,
       >(
         query: DocumentNode | TypedDocumentNode<TData, TVariables>,
         ...[options]: // we generally do not allow for a `TVariables` of `never`
         // TODO: check if we need a similar check in other hooks
         [TVariables] extends [never] ? [options: never]
         : // variables optional
-        {} extends TVariables ? [options?: TOptions]
+        {} extends TVariables ?
+          [
+            options?: TOptions &
+              useQuery.OptionsFor<TOptions, TData, TVariables>,
+          ]
         : // variables required
-          [options: TOptions]
+          [options: TOptions & useQuery.OptionsFor<TOptions, TData, TVariables>]
       ): useQuery.ResultForOptions<TData, TVariables, TOptions>;
 
       /** {@inheritDoc @apollo/client/react!useQuery.DocumentationTypes.useQuery:call(1)} */
@@ -574,24 +653,25 @@ export declare namespace useQuery {
         TData,
         TVariables extends OperationVariables,
         // this overload should never be manually defined, it should always be inferred
-        TOptions extends useQuery.Options<TData, NoInfer<TVariables>> &
-          VariablesOption<
-            TVariables & {
-              [K in Exclude<
-                keyof TOptions["variables"],
-                keyof TVariables
-              >]?: never;
-            }
-          >,
+        TOptions extends useQuery.ConstraintFor<TOptions, TData, TVariables>,
       >(
         query: DocumentNode | TypedDocumentNode<TData, TVariables>,
         ...[options]: // we generally do not allow for a `TVariables` of `never`
         // TODO: check if we need a similar check in other hooks
         [TVariables] extends [never] ? [options: never]
         : // variables optional
-        {} extends TVariables ? [options?: TOptions | SkipToken]
+        {} extends TVariables ?
+          [
+            options?:
+              | (TOptions & useQuery.OptionsFor<TOptions, TData, TVariables>)
+              | SkipToken,
+          ]
         : // variables required
-          [options: TOptions | SkipToken]
+          [
+            options:
+              | (TOptions & useQuery.OptionsFor<TOptions, TData, TVariables>)
+              | SkipToken,
+          ]
       ): useQuery.ResultForOptions<TData, TVariables, TOptions | SkipToken>;
 
       ssrDisabledResult: ObservableQuery.Result<any>;
